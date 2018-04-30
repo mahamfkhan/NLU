@@ -12,6 +12,8 @@ from subprocess import check_output
 from sklearn.feature_extraction.text import TfidfVectorizer,CountVectorizer
 from sklearn.svm import LinearSVC
 from sklearn.model_selection import train_test_split
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.linear_model import LogisticRegression
 
 
 #########################################################
@@ -71,7 +73,13 @@ def bow_vectorizer(text, vector, max_len):
     N =  len(words) - 2 + 1
     bows = [words[i]+" "+words[i+1] for i in range(N)]
     L = vector.transform(bows)
+    return L
 
+    
+def trouble_arrows(text):
+    if "> >" in text:
+        text = text.replace(">", "").strip(" ")
+    return text    
 
 def preprocess(filename):
     """
@@ -84,6 +92,7 @@ def preprocess(filename):
     df = df[:][~(df.gender == "I")]
     df.content = df.content.str.replace('\n'," ")
     df.content = df.content.apply(replace_nums)
+    df.content = df.content.apply(trouble_arrows)
     df = df[:][~(df.content.apply(lambda x: len(x.split(" ")))<=3)]
     df = df[:][~(df.content.apply(lambda x: len(x.split(" ")))>=201)]
     df["clean_content"] = df.content.apply(clean)
@@ -107,6 +116,20 @@ def split_dataframe(df, splits):
     return training_set, dev_set, test_set
 
 
+
+def fasttext_formatter(df, file_name):
+    f = open(file_name, "w")
+    for i in range(len(df)):
+        current = df.iloc[i]
+        if current.gender == "M":
+            label = "__label__Male "
+        else:
+            label = "__label__Female "
+        line =  label + current.content + "\n"
+        f.write(line)
+    else:
+        f.close()
+        
 #########################################################
 ###################### SVM ##############################
 #########################################################
@@ -142,12 +165,73 @@ def SVM_optimizer(df, splits, powers):
     print("The accuracy of the final SVM model is %s" % (test_acc))
     return test_acc, 10.0**max_power
 
+def logreg_regulizer(X_train, y_train, X_val, y_val, Cs):
+    """
+    Runs multiple Logiscti Regressions at different values of C(reciprocal of regulariazation) and returns a list of accuracies
+    """
+    accs = []
+    for c in Cs:
+        model = LogisticRegression(C = c)
+        model = model.fit(X_train, y_train)
+        pred_y = model.predict(X_val)
+        acc = sum(y_val.values == pred_y)/len(pred_y)
+        accs.append(acc)
+    return accs
+
+def logreg_optimizer(df, splits, powers):
+    splits = get_splits(df)
+    train_indices, val_indices, test_indices = splits
+    Cs = 10.0**powers
+    wordvector = TfidfVectorizer(analyzer='word', stop_words='english', max_df=0.4, min_df=5)
+    wordvector_fit = wordvector.fit_transform(df.clean_content)
+    X_train, X_val, X_test = wordvector_fit[train_indices], wordvector_fit[val_indices], wordvector_fit[test_indices]
+    y_train, y_val, y_test = split_dataframe(df.gender, splits)
+    accs = logreg_regulizer(X_train, y_train, X_val, y_val, Cs)
+    max_power = powers[np.argmax(np.array(accs))]
+    model = LinearSVC(C = 10.0**max_power)
+    model = model.fit(X_train, y_train)
+    best_y = model.predict(X_test)
+    test_acc = sum(y_test.values == best_y)/len(best_y)
+    print("The accuracy of the final Logistic Regression model is %s" % (test_acc))
+    return test_acc, 10.0**max_power
+
+
+def ADAboost_lr(X_train, y_train, X_val, y_val, LRs):
+    
+    for lr in LRs:
+        model = AdaBoostClassifier(learning_rate = lr)
+        model = model.fit(X_train, y_train)
+        pred_y = model.predict(X_val)
+        acc = sum(y_val.values == pred_y)/len(pred_y)
+        accs.append(acc)
+    return accs
+    
+    
+def ADAboost_optimizer(df, splits, powers):
+    splits = get_splits(df)
+    train_indices, val_indices, test_indices = splits
+    lrs = 10.0**powers
+    wordvector = TfidfVectorizer(analyzer='word', stop_words='english', max_df=0.4, min_df=5)
+    wordvector_fit = wordvector.fit_transform(df.clean_content)
+    X_train, X_val, X_test = wordvector_fit[train_indices], wordvector_fit[val_indices], wordvector_fit[test_indices]
+    y_train, y_val, y_test = split_dataframe(df.gender, splits)
+    accs = ADAboost_lr(X_train, y_train, X_val, y_val, lrs)
+    max_power = powers[np.argmax(np.array(accs))]
+    model = AdaBoostClassifier(learning_rate = 10.0**max_power)
+    model = model.fit(X_train, y_train)
+    best_y = model.predict(X_test)
+    test_acc = sum(y_test.values == best_y)/len(best_y)
+    print("The accuracy of the final Ada Boost model is %s" % (test_acc))
+    return test_acc, 10.0**max_power
+
+
+
 
 #########################################################
 ################### bow-CNN #############################
 #########################################################
 
-### NOTE: A decent amount of this code is a copy off or based off the code provided in HW 3
+### NOTE: A decent amount of this code is a copy of/based off the code provided in HW 3
 
 
 def padder(L, max_len):
@@ -279,23 +363,6 @@ def CNN_trainer(training_iter, num_train_steps, vocab_size, window_size, n_filte
     training_loop(model, loss, optimizer, training_iter, num_train_steps)
     return model
 
-def CNN_optimizer(df, num_train_steps, window_sizes, num_filters, lrs):
-    splits = get_splits(df)
-    training_set, dev_set, test_set = split_dataframe(df, splits)
-    vectorizer = CountVectorizer().fit(df.content)
-    vocab_size = len(vectorizer.vocabulary_)
-    num_label = len(df.gender.unique())
-    window_size = 5
-    n_filters = 6
-    learning_rate = 0.1 
-    batch_size = 32
-    paramters = {"num_train_steps" : num_train_steps,
-                 "window_sizes" : window_sizes,
-                 "num_filters" : num_filters,
-                 "lrs", lrs}
-    
-    #TODO Finish optimizer
-    
     
     
     
