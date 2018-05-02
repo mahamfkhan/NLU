@@ -1,3 +1,7 @@
+import torch
+import torch.nn as nn
+from torch.autograd import Variable
+import torch.nn.functional as F
 import nltk
 import os, sys, email,re
 import numpy as np
@@ -7,13 +11,15 @@ from nltk.stem.wordnet import WordNetLemmatizer
 import string
 from nltk.stem.porter import PorterStemmer
 from nltk.tokenize.regexp import RegexpTokenizer
-from dateutil.parser import parse
+import random
 from subprocess import check_output
+from dateutil.parser import parse
+
 from sklearn.feature_extraction.text import TfidfVectorizer,CountVectorizer
-from sklearn.svm import LinearSVC
-from sklearn.model_selection import train_test_split
 from sklearn.ensemble import AdaBoostClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC
+from sklearn.model_selection import train_test_split
 
 
 #########################################################
@@ -32,6 +38,21 @@ def clean_text(text):
     words = text.lower().split()
     words = [w for w in words if w not in eng_stopwords]
     return ' '.join(words)
+
+def clean(text):
+    stop = set(stopwords.words('english'))
+    stop.update(("to","cc","subject","http",
+                 "from","sent","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+    exclude = set(string.punctuation) 
+    lemma = WordNetLemmatizer()
+    porter= PorterStemmer()
+    
+    text=text.rstrip()
+    text = re.sub(r'[^a-zA-Z]', ' ', text)
+    stop_free = " ".join([i for i in text.lower().split() if((i not in stop) and (not i.isdigit()))])
+    punc_free = ''.join(ch for ch in stop_free if ch not in exclude)
+    normalized = " ".join(lemma.lemmatize(word) for word in punc_free.split())
+    return normalized
 
 def is_date(string):
     try: 
@@ -60,9 +81,9 @@ def replace_nums(text):
         word_date = is_date(word)
         word_float = is_float(word)
         if word_date:
-            words[i] = "/date/"
+            words[i] = "dummydate"
         if word_float:
-            words[i] = "/number/"
+            words[i] = "dummynumber"
     else:
         words = [word + " " for word in words]
         new_text = "".join(words).strip(" ")
@@ -238,7 +259,7 @@ def padder(L, max_len):
     L = L.todense(out=np.zeros(L.shape, L.dtype))
     L = torch.FloatTensor(L.tolist())
     if L.shape[0] < max_len:
-        diff = max_len - L.shape[0]
+        diff = int(max_len - L.shape[0])
         V = L.shape[1]
         padding = torch.FloatTensor(diff, V).zero_()
         
@@ -299,6 +320,9 @@ def evaluate(model, data_iter):
         vectors, labels = get_batch(data_iter[i])
         vectors = Variable(torch.stack(vectors).squeeze())
         labels = torch.stack(labels).squeeze()
+        if torch.cuda.is_available():
+            vectors = vectors.cuda()
+            labels = labels.cuda()
         output = model(vectors)
         _, predicted = torch.max(output.data, 1)
         total += labels.size(0)
@@ -313,7 +337,10 @@ def training_loop(model, loss, optimizer, training_iter, num_train_steps,
         vectors, labels = get_batch(next(training_iter))
         vectors = Variable(torch.stack(vectors).squeeze())
         labels = Variable(torch.stack(labels).squeeze())
-
+        if torch.cuda.is_available():
+            vectors = vectors.cuda()
+            labels = labels.cuda()
+            
         model.zero_grad()
         output = model(vectors)
 
@@ -352,15 +379,18 @@ class bowCNN(nn.Module):
             layer.bias.data.fill_(0)
     
     
-def CNN_trainer(training_iter, num_train_steps, vocab_size, window_size, n_filters, lr):
+def CNN_trainer(training_iter, num_train_steps, vocab_size, window_size, n_filters, lr, num_labels):
     model = bowCNN(vocab_size, window_size, n_filters, num_labels)
+    
+    if torch.cuda.is_available():
+        model.cuda()
     
     # Loss and Optimizer
     loss = nn.CrossEntropyLoss()  
     optimizer = torch.optim.Adam(model.parameters(), lr)
 
     # Train the model
-    training_loop(model, loss, optimizer, training_iter, num_train_steps)
+    training_loop(model, loss, optimizer, training_iter, num_train_steps, verbose = False)
     return model
 
     
