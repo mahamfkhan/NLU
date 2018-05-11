@@ -74,8 +74,9 @@ def is_float(string):
     else:
         return True
 
-def replace_nums(text):
+def replace_nums(text, names):
     words=text.split(" ")
+    
     for i in range(len(words)):
         word = words[i]
         word_date = is_date(word)
@@ -84,6 +85,10 @@ def replace_nums(text):
             words[i] = "dummydate"
         if word_float:
             words[i] = "dummynumber"
+        if " "+word.lower()+" " in names:
+            words[i] = "dummyname"
+        if ".com" in word:
+            words[i] = "dummyurl"
     else:
         words = [word + " " for word in words]
         new_text = "".join(words).strip(" ")
@@ -106,13 +111,15 @@ def preprocess(filename):
     """
     Does preprocessing on dataset retrrieved from filename
     """
+    names = pd.read_csv("name_gender.csv")
+    names = " "+" ".join(names.name[names.probability > .95].str.lower().values)+" "
     df = pd.read_csv(filename)
     df = df[:][~df.content.isnull()]
     df = df[:][~df.gender.isnull()]
     df = df[:][~(df.gender == "0.0")]
     df = df[:][~(df.gender == "I")]
     df.content = df.content.str.replace('\n'," ")
-    df.content = df.content.apply(replace_nums)
+    df.content = df.content.apply(lambda x: replace_nums(x, names))
     df.content = df.content.apply(trouble_arrows)
     df = df[:][~(df.content.apply(lambda x: len(x.split(" ")))<=3)]
     df = df[:][~(df.content.apply(lambda x: len(x.split(" ")))>=201)]
@@ -327,6 +334,7 @@ def evaluate(model, data_iter):
         _, predicted = torch.max(output.data, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum()
+        del vectors, labels, _, predicted
     return correct / float(total)
 
 def training_loop(model, loss, optimizer, training_iter, num_train_steps,
@@ -354,12 +362,15 @@ def training_loop(model, loss, optimizer, training_iter, num_train_steps,
                 %(step, lossy.data[0], evaluate(model, train_eval_iter), evaluate(model, dev_iter)))
 
         step += 1
-        
+        del vectors
+        del labels
+        del lossy
 class bowCNN(nn.Module):
     def __init__(self, vocab_size, window_size, n_filters, num_labels):
         super(bowCNN, self).__init__()
         self.conv1 = nn.Conv2d(1, n_filters, (window_size, vocab_size))
         self.fc1 = nn.Linear(n_filters, num_labels)
+        self.softmax = torch.nn.Softmax(1)
         self.init_weights()
         
     def forward(self, x):
@@ -368,6 +379,7 @@ class bowCNN(nn.Module):
         x = F.relu(x)
         x = F.max_pool1d(x, x.size(2)).squeeze(2)
         x = self.fc1(x)
+        x = self.softmax(x)
         return x
     
     def init_weights(self):
